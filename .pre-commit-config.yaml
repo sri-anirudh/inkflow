@@ -28,6 +28,7 @@ repos:
           - fastapi
           - pydantic-settings
           - sqlalchemy[asyncio]
+          - structlog
 
   - repo: https://github.com/pre-commit/mirrors-prettier
     rev: v4.0.0-alpha.8

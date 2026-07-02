@@ -2,7 +2,7 @@
 
 An educational project building an enterprise-grade e-signature platform (inspired by DocuSign), at a scale realistic for a production SaaS serving ~1,000 users. See `docs/product/product-vision.md` for the full pitch.
 
-**Status:** Sprint 1 — repo scaffold. Not runnable end-to-end yet (Supabase provisioning is Sprint 1 Card 2, working Docker Compose is Card 3).
+**Status:** Sprint 1 — API, Worker, and Redis run locally via Docker Compose against a real Supabase dev project. No product features yet (that starts with Card 7).
 
 ## Layout
 
@@ -24,6 +24,8 @@ Prerequisites (macOS): Docker Desktop, [`uv`](https://docs.astral.sh/uv/), Node.
 ```
 
 See `docs/handbook/deliverable-10-development-environment.md` for the full rationale and what runs where (local Docker vs. cloud Supabase).
+
+**One gotcha:** `SUPABASE_DB_URL` in `.env` must use Supabase's **session pooler** connection string (`postgres.<ref>@aws-x-region.pooler.supabase.com:5432`), not the direct `db.<ref>.supabase.co` host — the direct host is IPv6-only and Docker's default network can't reach it (`docker compose up` will show `db: "unreachable"` from `/health` if you use the wrong one). Find the pooler string in the Supabase dashboard under Project Settings → Database, or in `supabase/.temp/pooler-url` after `supabase link`.
 
 ## Contributing
 
