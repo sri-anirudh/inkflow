@@ -57,31 +57,47 @@ denied, not just insufficiently isolated), so the gap would have surfaced
 immediately once any real feature touched it, but it was silent to anyone
 just reading the migration and RLS policy code.
 
-**What we did:** with explicit sign-off, applied the missing grants directly
-to the dev sandbox DB (not committed as a migration — that's the Database
-Engineer's lane) to confirm the fix actually resolves it:
+**What we did during the spike:** with explicit sign-off, applied the missing
+grants directly to the dev sandbox DB as a live patch (not a migration) just
+to confirm the fix resolved the immediate `permission denied` error and let
+the spike run finish — granted `SELECT, INSERT, UPDATE, DELETE` broadly at
+that point, more than actually needed, purely to unblock the investigation.
+
+**Real fix, done as a proper follow-up (2026-07-02):** committed migration
+`a45b7568fa27` (`grant select on rls-protected tables to authenticated`),
+applied via `alembic upgrade head`, and documented as **ADR-027**
+(`docs/adr/ADR-027-authenticated-role-grants.md`). The live-patch's
+`INSERT`/`UPDATE`/`DELETE` grants were revoked first, since the considered
+design is narrower than the spike's quick patch:
 
 ```sql
 GRANT USAGE ON SCHEMA public TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.companies TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.profiles TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.envelopes TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.recipients TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.fields TO authenticated;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.audit_events TO authenticated;
+GRANT SELECT ON public.companies TO authenticated;
+GRANT SELECT ON public.profiles TO authenticated;
+GRANT SELECT ON public.envelopes TO authenticated;
+GRANT SELECT ON public.recipients TO authenticated;
+GRANT SELECT ON public.fields TO authenticated;
+GRANT SELECT ON public.audit_events TO authenticated;
 ```
 
-`recipient_tokens` deliberately excluded — Batch 3 §2 is explicit that no
-`authenticated`/`anon` role should ever get row access to it, service-role
-only. This matches that table's already-correct "zero policies, zero grants"
-state.
+`SELECT` only, not the spike's broader `INSERT`/`UPDATE`/`DELETE` — all
+writes to these tables go through the API's service-role connection, which
+bypasses RLS/grants entirely, so `authenticated` never needs write access.
+The one legitimate direct-from-browser path (BR-12e's internal-recipient
+dashboard read) is read-only. `recipient_tokens` deliberately excluded —
+Batch 3 §2 is explicit that no `authenticated`/`anon` role should ever get
+row access to it, service-role only. Verified against
+`information_schema.role_table_grants` post-migration, and the spike script
+re-run clean against the migrated state (same result: all acceptance
+criteria proven — the cross-tenant write attempt now fails on privilege
+absence rather than the RLS `WITH CHECK` clause, since `authenticated` has
+no `INSERT` at all, which is a stricter and more correct block than before).
 
-**Required follow-up (not done here — flagging per role charter, this is a
-schema/migration change):** a new Alembic migration, owned by the Database
-Engineer, adding these grants to the schema definition itself before Card 7
-starts, since the current migration produces a DB where RLS silently does
-nothing. Recommend filing this as its own chore card rather than folding it
-into Card 7/8's estimate, per this spike's own sizing note.
+A companion fix (a "missing" `companies` policy + a `SECURITY DEFINER` fix
+for `current_user_company_id()`) was proposed alongside this one and
+withdrawn — verification against the actual baseline migration showed both
+problems it described don't exist in this codebase. See `docs/adr/README.md`
+for that note.
 
 ---
 
@@ -164,6 +180,6 @@ block). Verified zero residual rows post-run.
   (Finding 3) rather than `PyJWKClient`; JWKS caching (Batch 2's ~10 min TTL
   guidance) still needs implementing — this spike fetched fresh every run,
   deliberately, to keep the spike simple.
-- **Before Card 7 starts:** file and merge the grants migration (Finding 1).
-  Until that lands, RLS on this project provides no actual protection —
-  worth treating as higher priority than its `S`-sized spike origin implies.
+- **Before Card 7 starts:** done — migration `a45b7568fa27` / ADR-027
+  (Finding 1) is committed and applied to the dev DB. RLS now provides
+  actual protection on all six tables; no remaining blocker for Card 7.
