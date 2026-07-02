@@ -4,14 +4,22 @@ services:
     ports: ["8000:8000"]
     env_file: .env
     depends_on: [redis]
-    volumes: ["./apps/api:/app"] # live reload
+    volumes:
+      - ./apps/api:/app # live reload
+      - api_venv:/app/.venv # named volume: keeps the image's Linux venv from being shadowed by the bind mount above
 
   worker:
     build: ./apps/api
-    command: rq worker --url redis://redis:6379
+    command: uv run rq worker --url redis://redis:6379
     env_file: .env
     depends_on: [redis]
+    volumes:
+      - ./apps/api:/app
+      - api_venv:/app/.venv
 
   redis:
     image: redis:7-alpine
     ports: ["6379:6379"]
+
+volumes:
+  api_venv:
