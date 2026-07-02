@@ -22,7 +22,7 @@ repos:
     rev: v2.1.0
     hooks:
       - id: mypy
-        files: ^apps/api/src/
+        files: ^apps/api/(src|tests)/
         args: [--config-file=apps/api/pyproject.toml]
         additional_dependencies:
           - fastapi
