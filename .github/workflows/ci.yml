@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+
+jobs:
+  api-checks:
+    name: api-checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+
+      - run: uv sync
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy src tests
+
+      - name: pytest
+        run: uv run pytest
+
+  web-checks:
+    name: web-checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - run: npm ci
+
+      - name: eslint
+        run: npm run lint
+
+      - name: tsc --noEmit
+        run: npx tsc --noEmit
+
+      - name: prettier --check
+        run: npm run format
+
+      - name: vitest
+        run: npm test
