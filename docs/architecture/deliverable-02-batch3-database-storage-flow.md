@@ -130,6 +130,8 @@ erDiagram
 
 ## 2. Row-Level Security (RLS) — Policy Summary
 
+**Correction, see ADR-027:** base `GRANT SELECT` statements to the `authenticated` role were never specified for any table below. A policy without a grant is inert — Postgres checks table-level privileges before it evaluates RLS policies at all, so as originally specified here, none of these policies were reachable by the `authenticated` role. The policies themselves (as written below) were correct; ADR-027 completes the mechanism with the missing grants. (A companion correction to this section's `companies` policy and `current_user_company_id()`'s `SECURITY DEFINER` status was also proposed during the same review and withdrawn — both were already correct as implemented; see `docs/adr/README.md`.)
+
 **What this shows:** How tenant isolation (R-07, Critical risk) is enforced at the database layer, as promised in Batch 1 (ADR-006).
 
 | Table | Policy (conceptual) |
