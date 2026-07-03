@@ -170,6 +170,18 @@ async def main() -> None:
     all_passed = True
 
     try:
+        # --- static check: current_user_company_id()'s SECURITY DEFINER status ------
+        # A proposed "fix" (later withdrawn, see docs/adr/README.md) assumed this
+        # function wasn't SECURITY DEFINER. Checked directly against pg_proc rather
+        # than trusted from reading the migration source, since that's the actual
+        # live property that matters for the profiles self-reference below.
+        helper_row = await conn.fetchrow(
+            "SELECT prosecdef FROM pg_proc WHERE proname = 'current_user_company_id'"
+        )
+        assert helper_row is not None, "current_user_company_id() not found in pg_proc"
+        assert helper_row["prosecdef"] is True, "current_user_company_id() is NOT SECURITY DEFINER"
+        print("[0/static] current_user_company_id(): confirmed SECURITY DEFINER via pg_proc")
+
         async with httpx.AsyncClient(timeout=15) as client:
             # --- signup (Admin API, pre-confirmed) ---------------------------------
             for c in companies:
@@ -267,6 +279,37 @@ async def main() -> None:
                     f"(expected only own) -> {verdict}"
                 )
 
+                # profiles itself -- deliberately its own check, not folded into the
+                # loop above. This is the one table whose policy is a *literal
+                # self-referencing subquery* (company_id = (SELECT company_id FROM
+                # profiles WHERE id = auth.uid())), not the current_user_company_id()
+                # helper every other table's policy uses.
+                #
+                # KNOWN BUG, confirmed 2026-07-02, fix pending Architect review (not
+                # applied here -- see docs/sprint-notes/card-5-spike-findings.md
+                # "Finding 2"): every query shape against profiles under the
+                # authenticated role (PK-scoped, company_id-scoped, unqualified) raises
+                # asyncpg.exceptions.InvalidObjectDefinitionError: infinite recursion
+                # detected in policy for relation "profiles". Postgres's RLS rewriter
+                # can't resolve a policy that queries the same table it protects
+                # without the SECURITY DEFINER bypass -- caught and recorded as a
+                # documented FAIL here rather than left to crash the whole run.
+                try:
+                    profile_rows = await query_as_user(
+                        conn, c["user_id"], "SELECT id, full_name FROM profiles"
+                    )
+                    seen_profile_names = {r["full_name"] for r in profile_rows}
+                    ok = seen_profile_names == {f"{c['label']} Admin"}
+                    verdict = "OK" if ok else "FAIL"
+                    print(
+                        f"[6/rls-own] {c['label']}: sees profiles={seen_profile_names} "
+                        f"(expected only own) -> {verdict}"
+                    )
+                except asyncpg.exceptions.InvalidObjectDefinitionError as e:
+                    ok = False
+                    print(f"[6/rls-own] {c['label']}: profiles query FAILED (known bug) -> {e}")
+                all_passed &= ok
+
             # --- RLS cross-tenant block: read -------------------------------------------
             a, b = companies
             cross_rows = await query_as_user(
@@ -289,6 +332,26 @@ async def main() -> None:
                 f"[7/rls-cross] {a['label']} reading {b['label']}'s envelopes: "
                 f"{len(cross_env_rows)} rows -> {verdict}"
             )
+
+            # Known bug (see the [6/rls-own] profiles block above): this always
+            # raises rather than blocking cleanly. Still a safe fail-closed outcome
+            # (hard error, not a leak) but not the "0 rows" result this AC wants.
+            cross_profile_sql = f"SELECT id FROM profiles WHERE company_id = '{b['company_id']}'"
+            try:
+                cross_profile_rows = await query_as_user(conn, a["user_id"], cross_profile_sql)
+                read_blocked_profile = len(cross_profile_rows) == 0
+                verdict = "BLOCKED (OK)" if read_blocked_profile else "LEAKED (FAIL)"
+                print(
+                    f"[7/rls-cross] {a['label']} reading {b['label']}'s profile: "
+                    f"{len(cross_profile_rows)} rows -> {verdict}"
+                )
+            except asyncpg.exceptions.InvalidObjectDefinitionError as e:
+                read_blocked_profile = False
+                print(
+                    f"[7/rls-cross] {a['label']} reading {b['label']}'s profile: "
+                    f"FAILED (known bug, fail-closed not fail-clean) -> {e}"
+                )
+            all_passed &= read_blocked_profile
 
             # --- RLS cross-tenant block: write ------------------------------------------
             write_blocked = await attempt_cross_tenant_insert(

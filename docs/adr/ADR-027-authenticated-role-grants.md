@@ -58,11 +58,19 @@ rejected in favor of the minimum privilege the one real direct-access path
 actually needs, consistent with the Handbook's least-privilege principle
 (§11).
 
-## Note on a withdrawn companion ADR
+## Note on a withdrawn (partially) companion ADR
 
-A draft ADR-026 (companies RLS policy + `SECURITY DEFINER` fix) was
-proposed alongside this one but withdrawn before being written — verification
-against the actual baseline migration showed both problems it described
-(a missing `companies` policy, `current_user_company_id()` not being
-`SECURITY DEFINER`) don't exist in this codebase; both were already correct
-as migrated. See `docs/adr/README.md` for the number-gap note.
+A draft ADR-026 was proposed alongside this one, bundling three claims. Two
+were withdrawn before being written — verification against the actual
+baseline migration showed a "missing" `companies` policy and
+`current_user_company_id()` needing `SECURITY DEFINER` don't describe real
+problems; both were already correct as migrated. The third claim — that
+`profiles`' own RLS policy needed to switch to the `current_user_company_id()`
+helper instead of its literal self-referencing subquery — was **not**
+withdrawn. It's confirmed as a real, reproducible bug (Postgres raises
+`infinite recursion detected in policy for relation "profiles"` on every
+query against that table under the `authenticated` role). See
+`docs/sprint-notes/card-5-spike-findings.md` Finding 2 for the full
+reproduction and root-cause writeup, and `docs/adr/README.md` for the
+ADR-026 number-gap note. The fix itself is not applied here — pending
+Architect sign-off before any change to `profiles`' policy.

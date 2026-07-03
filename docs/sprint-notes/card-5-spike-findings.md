@@ -2,7 +2,10 @@
 
 **Author:** Backend Engineer
 **Date:** 2026-07-02
-**Status:** Complete
+**Status:** Card 5's own acceptance criteria are met (below). **One new
+blocking finding (Finding 2) discovered during follow-up work, confirmed via
+reproduction, fix pending Architect review — not yet applied.** Do not treat
+this doc as "all clear" for Card 6 until Finding 2 is resolved.
 **Card:** Sprint 1, Card 5 (`docs/sprint-notes/sprint-1-planning.md`)
 **Evidence:** `apps/api/spikes/card5_auth_jwt_rls/spike.py` (not production code — see its docstring)
 
@@ -19,15 +22,25 @@ this project's real dev Supabase instance:
 
 ## Result
 
-**All three acceptance criteria are met**, but only after fixing a real gap
-found along the way (below). The spike script ran end-to-end against the live
-dev project with two throwaway companies/users, proving:
+**All three acceptance criteria are met**, using `companies` and `envelopes`
+as the RLS-scoped tables the criteria call for — but a follow-up pass, and a
+direct question about whether `profiles` specifically had been tested, found
+a real, confirmed, unfixed bug on that table (Finding 2). The spike script
+ran end-to-end against the live dev project with two throwaway companies/users,
+proving:
 
 - [x] Signup → JWT → verified request → RLS-scoped query returns only that
-      company's data
+      company's data (`companies`, `envelopes`)
 - [x] A second test company/user confirms cross-tenant queries (read *and*
       write) are blocked
-- [x] The gap found is documented here, before Cards 7/8 start
+- [x] Every gap or surprise found — including one found after the original
+      run, in response to being asked whether `profiles` was actually
+      covered — is documented here, before Card 6 starts
+
+**`profiles` itself does not currently pass the same bar** — see Finding 2.
+It's outside this card's literal AC (which names no specific table), but
+it's the same mechanism the AC is about, on a table central to ADR-008, so
+it's flagged here rather than left for Card 6/7/8 to discover.
 
 ---
 
@@ -93,15 +106,111 @@ criteria proven — the cross-tenant write attempt now fails on privilege
 absence rather than the RLS `WITH CHECK` clause, since `authenticated` has
 no `INSERT` at all, which is a stricter and more correct block than before).
 
-A companion fix (a "missing" `companies` policy + a `SECURITY DEFINER` fix
-for `current_user_company_id()`) was proposed alongside this one and
-withdrawn — verification against the actual baseline migration showed both
-problems it described don't exist in this codebase. See `docs/adr/README.md`
-for that note.
+Two companion claims proposed alongside this fix were withdrawn after
+verification against the actual baseline migration: a "missing" `companies`
+policy (it already existed) and `current_user_company_id()` needing a
+`SECURITY DEFINER` fix (it already was). See `docs/adr/README.md` for that
+note. A **third** claim proposed in the same message — that `profiles`' own
+policy needed to switch to the `current_user_company_id()` helper — was
+*not* withdrawn. It's confirmed as a real bug; see Finding 2 below.
 
 ---
 
-## Finding 2 (non-blocking, informational): signup → JWT isn't a one-step flow for automated testing
+## Finding 2 (blocking, confirmed, NOT YET FIXED — pending Architect review): `profiles` RLS policy causes infinite recursion
+
+**Status:** Identified 2026-07-02, during a follow-up to Finding 1 prompted
+by a direct question about whether this was ever actually tested (it wasn't,
+in the original spike run — see below). Reproduced independently, twice, with
+different query shapes. **Fix not applied** — holding for Architect review
+since a companion claim in the same original proposal was wrong on two other
+points (see Finding 1), so this one gets independent sign-off before any
+schema change, even though the evidence here is unambiguous.
+
+**What we found:** every query against `profiles` under the `authenticated`
+role — regardless of shape (primary-key lookup, `company_id`-scoped, or a
+bare unqualified `SELECT`) — raises:
+
+```
+asyncpg.exceptions.InvalidObjectDefinitionError: infinite recursion detected
+in policy for relation "profiles"
+```
+
+Confirmed three ways independently: inside the extended spike script
+(`[6/rls-own]` and `[7/rls-cross]` steps), and in a standalone diagnostic
+script testing three query shapes against a freshly created real Supabase
+Auth user + profile row, all three failing identically.
+
+**Root cause:** `profiles`' RLS policy is a *literal self-referencing
+subquery* —
+
+```sql
+CREATE POLICY profiles_company_isolation ON profiles
+FOR ALL
+USING (company_id = (SELECT company_id FROM profiles WHERE id = auth.uid()))
+WITH CHECK (company_id = (SELECT company_id FROM profiles WHERE id = auth.uid()))
+```
+
+— rather than the `current_user_company_id()` `SECURITY DEFINER` helper every
+other table's policy uses. The baseline migration's own comment explains this
+was a deliberate choice: *"literal subquery, not the helper (the helper
+itself queries profiles — using it here would be circular in a way that's
+harder to read, even though Postgres would evaluate it fine either way)."*
+**That last clause is empirically false.** Postgres's RLS query rewriter
+can't resolve a policy on table X whose own condition reads from table X
+again without hitting a hard recursion guard — it errors rather than
+looping forever. The `SECURITY DEFINER` helper pattern exists specifically
+to avoid this: the helper's inner `profiles` lookup runs as the function's
+owning role (which bypasses RLS), so it never re-triggers the outer policy.
+`profiles`' own policy skips that helper and hits the exact trap it exists
+to avoid.
+
+**Why this wasn't caught in the original spike run:** the original spike's
+ADR-008 lookup (`[5/lookup]`) runs on the service-role connection, which
+bypasses RLS by design (matching how the real API does it — Batch 2/3 are
+explicit that ADR-008's lookup is never meant to go through the
+`authenticated` role). The original RLS-scoped query checks (`[6/rls-own]`,
+`[7/rls-cross]`) only exercised `companies` and `envelopes`, not `profiles`
+— an actual coverage gap in the original run, surfaced only when directly
+asked "was this actually tested?"
+
+**Why this was invisible until now, even on the dev DB:** Finding 1's grant
+gap masked it. Before ADR-027's grants were applied, every query against
+`profiles` under `authenticated` failed at the privilege-check stage
+(`permission denied`) — before Postgres ever got far enough to evaluate the
+policy and hit the recursion. Fixing Finding 1 is what exposed Finding 2; the
+two bugs were stacked in the same original migration, independently of each
+other.
+
+**Blast radius:** not a data leak — this fails closed with a hard error, the
+same category of outcome R-07 cares about avoiding the *opposite* of. But it
+means `profiles` is currently unusable under RLS for any direct,
+non-service-role access. Nothing in the current codebase exercises this path
+yet (the real `GET /me` flow goes through the API's service-role connection
+per Batch 2), so no live feature is broken today — but any future feature
+that queries `profiles` directly as `authenticated` (a plausible shape for
+something profile-page-adjacent under BR-12e's general pattern of direct
+browser-to-Supabase reads) will hard-fail the moment it's built, not
+gracefully deny.
+
+**Proposed fix (not applied):** switch `profiles`' policy to use
+`current_user_company_id()`, matching every other table:
+
+```sql
+CREATE POLICY profiles_company_isolation ON profiles
+FOR ALL
+USING (company_id = current_user_company_id())
+WITH CHECK (company_id = current_user_company_id());
+```
+
+This is the fix originally proposed (correctly, on this one point) alongside
+the two withdrawn claims in Finding 1. Not applying it here — holding for
+explicit Architect sign-off given the mixed accuracy of that original
+proposal, despite this specific piece now having independent, reproducible
+confirmation.
+
+---
+
+## Finding 3 (non-blocking, informational): signup → JWT isn't a one-step flow for automated testing
 
 The dev project has `mailer_autoconfirm: false` (confirmed via
 `GET /auth/v1/settings`), so the public `signUp` endpoint alone doesn't yield
@@ -119,7 +228,7 @@ correct and expected for the real product (nothing to fix), but it means:
   test fixtures (not urgent — noting here so Cards 7/8 don't have to
   rediscover it).
 
-## Finding 3 (confirms an assumption, no action needed): JWT signing scheme
+## Finding 4 (confirms an assumption, no action needed): JWT signing scheme
 
 Batch 2 assumes JWKS-based verification (ADR-004's "one JWT scheme"). Confirmed:
 this project's `/auth/v1/.well-known/jwks.json` serves a single `ES256`
@@ -165,21 +274,39 @@ PostgREST on every real request):
   not an error — RLS silently filters, exactly as designed.
 - Company A attempting to `INSERT` an envelope with Company B's `company_id`:
   **rejected** (`InsufficientPrivilegeError`, the `WITH CHECK` clause firing).
+- Each user's query of `profiles` (own row, and cross-tenant): **fails with
+  `InvalidObjectDefinitionError`, not a clean result** — see Finding 2. This
+  is a fail-closed outcome (no leak), but not the working behavior the other
+  five tables demonstrate.
 
 All test companies, profiles, envelopes, and Supabase Auth users were deleted
 at the end of the run (including on failure — cleanup is in a `finally`
-block). Verified zero residual rows post-run.
+block, which ran correctly even when the profiles query raised). Verified
+zero residual rows post-run, across both the original run and the extended
+run that surfaced Finding 2.
 
 ---
 
-## Recommendation for Cards 7/8
+## Recommendation for Cards 6/7/8
 
+- **Finding 2 blocks nothing in Card 5 itself** (its acceptance criteria are
+  about the chain generally, proven via `companies`/`envelopes`), but it's a
+  real, confirmed defect in a table Card 6/7 will very likely touch.
+  Recommend resolving it — Architect sign-off, then a committed
+  migration + ADR, same pattern as ADR-027 — before Card 6 builds anything
+  that reads `profiles` under anything other than the service-role
+  connection.
 - **Card 7** (Company + Admin registration): the Batch 2 §1 flow is confirmed
-  workable as designed — no changes needed to the approach.
+  workable as designed — no changes needed to the approach. (This flow uses
+  the service-role connection for the profile write, so Finding 2 doesn't
+  block it directly — but see the note above.)
 - **Card 8** (Login + JWT middleware): use `httpx` + manual JWK matching
-  (Finding 3) rather than `PyJWKClient`; JWKS caching (Batch 2's ~10 min TTL
+  (Finding 4) rather than `PyJWKClient`; JWKS caching (Batch 2's ~10 min TTL
   guidance) still needs implementing — this spike fetched fresh every run,
-  deliberately, to keep the spike simple.
-- **Before Card 7 starts:** done — migration `a45b7568fa27` / ADR-027
-  (Finding 1) is committed and applied to the dev DB. RLS now provides
-  actual protection on all six tables; no remaining blocker for Card 7.
+  deliberately, to keep the spike simple. ADR-008's lookup goes through the
+  service-role connection (per Batch 2/3), so Finding 2 doesn't block Card 8
+  either — but any temptation to "simplify" that lookup into an
+  `authenticated`-role query later will hit it immediately.
+- **Finding 1:** done — migration `a45b7568fa27` / ADR-027 is committed and
+  applied to the dev DB. RLS now provides actual protection on five of six
+  tables; `profiles` remains blocked by Finding 2.
